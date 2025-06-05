@@ -1,0 +1,8 @@
+flask
+openai
+flask_cors
+PyPDF2
+python-dotenv
+requests
+mysql-connector-python
+PyMuPDF
