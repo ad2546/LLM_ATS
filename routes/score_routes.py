@@ -1,10 +1,6 @@
 # routes/score_routes.py
-import os, sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-import os
-import logging
 from flask import Blueprint, request, jsonify
-
+import os, logging, mysql.connector
 from utils.pdf_utils import read_pdf_content
 from utils.candidate_utils import extract_candidate_details
 from utils.db_utils import get_connection
@@ -26,41 +22,35 @@ def recommended():
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # 1) Fetch jd_text, category1_id & category2_id
+        # 1) Fetch jd_text and category IDs
         cursor.execute(
-            "SELECT `jd_text`, `category1_id`, `category2_id` FROM `job_description` WHERE `jd_id` = %s",
+            "SELECT `jd_text`,`category1_id`,`category2_id` FROM `job_description` WHERE `jd_id` = %s",
             (jd_id,)
         )
         jd_row = cursor.fetchone()
         if not jd_row:
             msg = f"Job description {jd_id} not found"
-            save_log("ERROR", msg, process="Resume_Analysis")
+            save_log("ERROR", msg, process="JD_Analysis")
             cursor.close()
             conn.close()
             return jsonify({'error': msg}), 404
 
         jd_text = jd_row["jd_text"]
-        cat_ids = []
-        if jd_row["category1_id"]:
-            cat_ids.append(jd_row["category1_id"])
-        if jd_row["category2_id"]:
-            cat_ids.append(jd_row["category2_id"])
+        cat_ids = [cid for cid in (jd_row["category1_id"], jd_row["category2_id"]) if cid]
 
-        # 2) Convert category_id → category_name
+        # 2) Convert category IDs → category names
         category_names = []
         for cid in cat_ids:
             cursor.execute("SELECT `name` FROM `category` WHERE `category_id` = %s", (cid,))
-            r2 = cursor.fetchone()
-            if r2:
-                category_names.append(r2["name"])
+            row = cursor.fetchone()
+            if row:
+                category_names.append(row["name"])
 
-        # Ensure exactly two slots
-        if len(category_names) == 1:
+        # Always supply exactly two slots
+        while len(category_names) < 2:
             category_names.append("")
-        elif len(category_names) == 0:
-            category_names = ["", ""]
 
-        # 3) Locate ./resumes directory
+        # 3) Point to your ./resumes folder
         resumes_dir = os.path.join(os.path.dirname(__file__), '../resumes')
         if not os.path.isdir(resumes_dir):
             msg = f"Resumes folder not found at {resumes_dir}"
@@ -75,13 +65,13 @@ def recommended():
 
         summary = []
 
-        # 5) Loop over each resume PDF in ../resumes
+        # 5) Loop over each resume PDF — one HTTP call per file
         for fname in os.listdir(resumes_dir):
             if not fname.lower().endswith(".pdf"):
                 continue
             full_path = os.path.join(resumes_dir, fname)
 
-            # 5a) Read PDF bytes + extract text
+            # 5a) Read PDF and extract plain text
             try:
                 with open(full_path, "rb") as rf:
                     pdf_bytes = rf.read()
@@ -92,11 +82,11 @@ def recommended():
                 save_log("ERROR", msg, process="JD_Analysis")
                 continue
 
-            # 5b) Extract candidate details
+            # 5b) Extract candidate basics (email → key for upsert)
             cand_info = extract_candidate_details(resume_text)
             email = (cand_info.get("email") or "").lower().strip()
 
-            # 5c) Get or create `candidate` row
+            # 5c) Insert or reuse existing candidate row
             candidate_id = None
             if email and email in existing_map:
                 candidate_id = existing_map[email]
@@ -126,31 +116,30 @@ def recommended():
                 candidate_id = cursor.lastrowid
                 existing_map[email] = candidate_id
 
-            # 5d) Score the resume once against both categories
+            # 5d) Score this single resume against both categories
             combined_scores = score_resume_for_categories(category_names, jd_text, resume_text)
 
-            # 5e) Insert each category score row into `category_score`
+            # 5e) Persist each category’s score row
             for cat_entry in combined_scores["categories"]:
                 cname   = cat_entry["category"]
                 sc      = cat_entry["score"]
                 wt      = cat_entry["weight"]
                 just    = cat_entry["justification"]
 
-                # Skip empty category names
                 if not cname:
                     continue
 
                 cursor.execute(
                     """
                     INSERT INTO `category_score`
-                      (`candidate_id`, `category_name`, `score`, `weight`, `justification`, `updated_at`)
-                    VALUES (%s, %s, %s, %s, %s, NOW())
+                      (`candidate_id`,`jd_id`,`category_name`,`score`,`weight`,`justification`,`updated_at`)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
                     """,
-                    (candidate_id, cname, sc, wt, just)
+                    (candidate_id, jd_id, cname, sc, wt, just)
                 )
                 conn.commit()
 
-            # 5f) Build a single summary JSON object
+            # 5f) Collect summary for this resume
             summary.append({
                 "candidate_email": email,
                 "candidate_id":    candidate_id,
