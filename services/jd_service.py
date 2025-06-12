@@ -139,14 +139,14 @@ Do NOT include markdown, commentary, or extra fields—only the JSON object.
             if field not in result:
                 raise ValueError(f"Missing field '{field}' in DeepSeek response")
 
-        # Deduplicate categories and limit to 2
+        # Deduplicate categories and limit to 1
         unique_cats = []
         for name in result["categories"]:
             if name not in unique_cats:
                 unique_cats.append(name)
-            if len(unique_cats) == 2:
+            if len(unique_cats) == 1:
                 break
-        result["categories"] = unique_cats
+        result["categories"] = unique_cats[:1]
 
         return result
 
@@ -162,16 +162,13 @@ def save_jd_to_db(jd_text: str, categories: list, qualifications: str, requireme
     Saves a new job_description row with:
       - jd_text,
       - category_detected (comma-separated),
-      - category1_id, category2_id,
+      - category1_id,
       - qualifications, requirements.
     """
     c1_id = None
-    c2_id = None
 
     if len(categories) >= 1:
         c1_id = get_or_create_category_id(categories[0], "category1")
-    if len(categories) >= 2:
-        c2_id = get_or_create_category_id(categories[1], "category2")
 
     conn = get_connection()
     cursor = conn.cursor()
@@ -180,14 +177,13 @@ def save_jd_to_db(jd_text: str, categories: list, qualifications: str, requireme
             """
             INSERT INTO `job_description`
               (`jd_text`, `category_detected`, `uploaded_at`,
-               `category1_id`, `category2_id`, `qualifications`, `requirements`)
-            VALUES (%s, %s, NOW(), %s, %s, %s, %s)
+               `category1_id`, `qualifications`, `requirements`)
+            VALUES (%s, %s, NOW(), %s, %s, %s)
             """,
             (
                 jd_text,
                 ", ".join(categories),
                 c1_id,
-                c2_id,
                 qualifications,
                 requirements
             )

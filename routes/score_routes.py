@@ -22,9 +22,9 @@ def recommended():
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
 
-        # 1) Fetch jd_text and category IDs
+        # 1) Fetch jd_text and category1_id only
         cursor.execute(
-            "SELECT `jd_text`,`category1_id`,`category2_id` FROM `job_description` WHERE `jd_id` = %s",
+            "SELECT `jd_text`,`category1_id` FROM `job_description` WHERE `jd_id` = %s",
             (jd_id,)
         )
         jd_row = cursor.fetchone()
@@ -36,19 +36,15 @@ def recommended():
             return jsonify({'error': msg}), 404
 
         jd_text = jd_row["jd_text"]
-        cat_ids = [cid for cid in (jd_row["category1_id"], jd_row["category2_id"]) if cid]
+        cat_ids = [jd_row["category1_id"]] if jd_row["category1_id"] else []
 
-        # 2) Convert category IDs → category names
+        # 2) Convert category ID → category name
         category_names = []
         for cid in cat_ids:
             cursor.execute("SELECT `name` FROM `category` WHERE `category_id` = %s", (cid,))
             row = cursor.fetchone()
             if row:
                 category_names.append(row["name"])
-
-        # Always supply exactly two slots
-        while len(category_names) < 2:
-            category_names.append("")
 
         # 3) Point to your ./resumes folder
         resumes_dir = os.path.join(os.path.dirname(__file__), '../resumes')
@@ -116,19 +112,17 @@ def recommended():
                 candidate_id = cursor.lastrowid
                 existing_map[email] = candidate_id
 
-            # 5d) Score this single resume against both categories
+            # 5d) Score this single resume against the single category
             combined_scores = score_resume_for_categories(category_names, jd_text, resume_text)
 
-            # 5e) Persist each category’s score row
-            for cat_entry in combined_scores["categories"]:
-                cname   = cat_entry["category"]
-                sc      = cat_entry["score"]
-                wt      = cat_entry["weight"]
-                just    = cat_entry["justification"]
+            # 5e) Persist the single category score row
+            cat_entry = combined_scores["category"]
+            cname   = cat_entry["category"]
+            sc      = cat_entry["score"]
+            wt      = cat_entry["weight"]
+            just    = cat_entry["justification"]
 
-                if not cname:
-                    continue
-
+            if cname:
                 cursor.execute(
                     """
                     INSERT INTO `category_score`
@@ -144,7 +138,7 @@ def recommended():
                 "candidate_email": email,
                 "candidate_id":    candidate_id,
                 "resume_file":     fname,
-                "categories":      combined_scores["categories"],
+                "category":       combined_scores["category"],
                 "final_score":     combined_scores["final_score"]
             })
 

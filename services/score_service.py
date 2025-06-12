@@ -7,6 +7,7 @@ import json
 import logging
 import requests
 from typing import Tuple
+from collections import Counter
 
 from config import Settings
 from Tools.logs import save_log
@@ -18,6 +19,7 @@ settings = Settings()
 MAX_TOKENS = 65536
 
 def approximate_token_count(text: str) -> int:
+    print(len(text.split()))
     """Roughly count tokens by splitting on whitespace."""
     return len(text.split())
 
@@ -38,6 +40,10 @@ def prepare_jd_and_resume(jd_text: str, resume_text: str) -> Tuple[str, str]:
       1) If JD alone > 30k tokens, truncate JD to 30k.
       2) Otherwise, allocate remaining tokens to resume.
     """
+    # Sanitize null characters
+    jd_text = jd_text.replace("\x00", "")
+    resume_text = resume_text.replace("\x00", "")
+
     jd_tokens = approximate_token_count(jd_text)
     # If JD is extremely long, cut it to 30k tokens
     if jd_tokens > 60000:
@@ -53,30 +59,26 @@ def prepare_jd_and_resume(jd_text: str, resume_text: str) -> Tuple[str, str]:
 
     resume_tokens = approximate_token_count(resume_text)
     if resume_tokens > budget:
-        logger.warning(f"Truncating resume from {resume_tokens} tokens → {budget} tokens.")
-        save_log("WARNING", f"Resume truncated from {resume_tokens} to {budget} tokens", process="JD_Analysis")
-        resume_text = truncate_text_to_tokens(resume_text, budget)
+        logger.warning(f"Resume too large ({resume_tokens} tokens) – summarizing using top keywords.")
+        save_log("WARNING", f"Resume too large: summarizing instead of truncating", process="JD_Analysis")
+        words = [word.strip(".,;:!?()[]{}\"'").lower() for word in resume_text.split()]
+        common_words = Counter(words).most_common(100)
+        resume_text = ", ".join([w for w, _ in common_words])
 
     return jd_text, resume_text
 
 def score_resume_for_categories(category_names: list, jd_text: str, resume_text: str) -> dict:
     """
-    Calls DeepSeek once to score 'resume_text' against both categories.
+    Calls DeepSeek once to score 'resume_text' against a category.
     If the raw resume is too large (> MAX_TOKENS), log and skip sending to DeepSeek.
     Returns a dict:
       {
-        "categories": [
-          {"category": "<cat1>", "score": <0–100>, "weight": <0.0–1.0>, "justification": "..."},
-          {"category": "<cat2>", "score": <0–100>, "weight": <0.0–1.0>, "justification": "..."}
-        ],
-        "final_score": <0–100>
+        "category": {"category": "<cat>", "score": <0–100>, "weight": <0.0–1.0>, "justification": "..."},
+        "final_score": <0–10>
       }
     """
-    # Ensure exactly two slots
-    if len(category_names) == 1:
-        category_names.append("")  # second slot empty
-    elif len(category_names) == 0:
-        category_names = ["", ""]
+    if not category_names:
+        category_names = [""]
 
     # Check raw resume size before any truncation
     raw_resume_tokens = approximate_token_count(resume_text)
@@ -84,25 +86,18 @@ def score_resume_for_categories(category_names: list, jd_text: str, resume_text:
         msg = f"Resume too large ({raw_resume_tokens} tokens) – skipping DeepSeek scoring."
         logger.error(msg)
         save_log("ERROR", msg, process="JD_Analysis")
-        # Return zeroed fallback for both categories
-        return {
-            "categories": [
-                {"category": category_names[0], "score": 0.0, "weight": 0.0, "justification": "Resume too large to process."},
-                {"category": category_names[1], "score": 0.0, "weight": 0.0, "justification": "Resume too large to process."}
-            ],
-            "final_score": 0.0
-        }
+        # Return zeroed fallback for category
+        return score_resume_nlp_based(category_names[0], jd_text, resume_text)
 
     # 1) Truncate JD + resume to fit under MAX_TOKENS
     jd_trimmed, resume_trimmed = prepare_jd_and_resume(jd_text, resume_text)
 
     prompt = f"""
-You are an AI that scores a candidate’s resume against two categories within a single job description.
+You are an AI that scores a candidate’s resume against a single category within a job description.
 Prioritize “experience” with highest weight, then “education,” then “skills.”
 
-Categories:
-1. "{category_names[0]}"
-2. "{category_names[1]}"
+Category:
+"{category_names[0]}"
 
 Full Job Description:
 {jd_trimmed}
@@ -110,26 +105,28 @@ Full Job Description:
 Candidate Resume:
 {resume_trimmed}
 
-Respond ONLY as JSON, exactly in this form (no extra comments):
+Respond ONLY as JSON, exactly in this form (no extra comments).
+IMPORTANT: All scores must be floating-point numbers between 0 and 10 (not fractions or percentages like 0.7 or 70%). Example: 6.5, 8.0, 4.3
 
 {{
-  "categories": [
-    {{
-      "category": "{category_names[0]}",
-      "score": 0.0,
-      "weight": 0.0,
-      "justification": ""
-    }},
-    {{
-      "category": "{category_names[1]}",
-      "score": 0.0,
-      "weight": 0.0,
-      "justification": ""
-    }}
-  ],
-  "final_score": 0.0
+  "category": {{
+    "category": "Data Science",
+    "score": 7.5,  # out of 10
+    "weight": 0.8,
+    "justification": "..."
+  }},
+  "final_score": 7.5  # out of 10
 }}
 """
+
+    total_chars = len(prompt)
+    logger.error(f"Estimated total characters sent to DeepSeek: {total_chars}")
+
+    if total_chars > 150000:
+        msg = f"Aborting DeepSeek request – prompt too large: {total_chars} characters (limit is 150,000)"
+        logger.error(msg)
+        save_log("ERROR", msg, process="JD_Analysis")
+        return score_resume_nlp_based(category_names[0], jd_text, resume_text)
 
     url = "https://api.deepseek.com/v1/chat/completions"
     headers = {
@@ -148,6 +145,8 @@ Respond ONLY as JSON, exactly in this form (no extra comments):
         "temperature": 0.2
     }
 
+    logger.error(f"DeepSeek request to {url}:\nHeaders: {headers}\nPayload:\n{json.dumps(payload, indent=2)}")
+
     try:
         r = requests.post(url, headers=headers, json=payload)
         r.raise_for_status()
@@ -163,28 +162,120 @@ Respond ONLY as JSON, exactly in this form (no extra comments):
         parsed = json.loads(raw)
 
         # Validate
-        if "categories" not in parsed or "final_score" not in parsed:
+        if "category" not in parsed or "final_score" not in parsed:
             raise ValueError("Missing keys in JSON response")
 
         # Convert types
-        for entry in parsed["categories"]:
-            entry["score"] = float(entry["score"])
-            entry["weight"] = float(entry["weight"])
-        parsed["final_score"] = float(parsed["final_score"])
+        entry = parsed["category"]
+        entry["score"] = float(entry["score"])
+        entry["weight"] = float(entry["weight"])
+        parsed["final_score"] = round(entry["score"] * entry["weight"], 2)
 
         return parsed
 
     except Exception as e:
+        if 'r' in locals():
+            try:
+                logger.error(f"DeepSeek error response:\n{r.text}")
+                save_log("ERROR", r.text, process="DeepSeek_Scoring")
+            except Exception:
+                pass
         msg = f"Error calling DeepSeek combined scoring: {str(e)}"
         logger.error(msg)
         save_log("ERROR", msg, process="JD_Analysis")
         # Return zeroed fallback
         return {
-            "categories": [
-                {"category": category_names[0], "score": 0.0, "weight": 0.0,
-                 "justification": f"Error: {str(e)}"},
-                {"category": category_names[1], "score": 0.0, "weight": 0.0,
-                 "justification": f"Error: {str(e)}"}
-            ],
+            "category": {"category": category_names[0], "score": 0.0, "weight": 0.0,
+                         "justification": f"Error: {str(e)}"},
+            "final_score": 0.0
+        }
+
+def score_resume_nlp_based(category_name: str, jd_text: str, resume_text: str) -> dict:
+    """
+    Fallback scoring method for large resumes. Performs keyword summarization
+    and asks LLM to score based on top tokens.
+    """
+    from collections import Counter
+
+    # Sanitize null characters
+    jd_text = jd_text.replace("\x00", "")
+    resume_text = resume_text.replace("\x00", "")
+
+    # Tokenize and extract top keywords (simplified)
+    words = [word.strip(".,;:!?()[]{}\"'").lower() for word in resume_text.split()]
+    common_words = Counter(words).most_common(100)
+    summary_keywords = ", ".join([w for w, _ in common_words])
+
+    prompt = f"""
+You are a resume scorer. Given a category, job description, and a list of resume keywords, assign a 0–10 score.
+
+Category: "{category_name}"
+
+Job Description:
+{jd_text}
+
+Resume Keywords:
+{summary_keywords}
+
+IMPORTANT: All scores must be floating-point numbers between 0 and 10. Example: 6.5, 8.0, 4.3
+
+Respond in this format:
+
+{{
+  "category": {{
+    "category": "{category_name}",
+    "score": 0.0,
+    "weight": 0.0,
+    "justification": "..."
+  }},
+  "final_score": 0.0
+}}
+"""
+
+    try:
+        r = requests.post(
+            "https://api.deepseek.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "deepseek-chat",
+                "messages": [
+                    {"role": "system", "content": "You are a resume scoring assistant."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.2
+            }
+        )
+        r.raise_for_status()
+        raw = r.json()['choices'][0]['message']['content'].strip()
+
+        if raw.startswith("```json"):
+            raw = raw[7:].strip("` \n")
+        elif raw.startswith("```"):
+            raw = raw[3:].strip("` \n")
+
+        parsed = json.loads(raw)
+        if "category" not in parsed or "final_score" not in parsed:
+            raise ValueError("Missing keys in fallback response")
+
+        entry = parsed["category"]
+        entry["score"] = float(entry["score"])
+        entry["weight"] = float(entry["weight"])
+        parsed["final_score"] = float(parsed["final_score"])
+
+        return parsed
+    except Exception as e:
+        msg = f"NLP fallback scoring failed: {e}"
+        logger.error(msg)
+        save_log("ERROR", msg, process="JD_Analysis")
+        return {
+            "category": {
+                "category": category_name,
+                "score": 0.0,
+                "weight": 0.0,
+                "justification": f"NLP fallback failed: {e}"
+            },
             "final_score": 0.0
         }

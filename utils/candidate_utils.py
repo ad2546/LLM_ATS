@@ -322,3 +322,42 @@ def upsert_candidate(cand_info: dict, resume_path: str) -> int:
     finally:
         cursor.close()
         conn.close()
+
+def upsert_category_score(candidate_id: int, category: str, score: float, justification: str) -> None:
+    """
+    Inserts or updates the category score for a candidate.
+    """
+    conn = mysql.connector.connect(**db_config)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            SELECT score_id FROM candidate_score
+            WHERE candidate_id = %s AND category_name = %s
+        """, (candidate_id, category))
+        row = cursor.fetchone()
+
+        if row:
+            # Update existing score
+            cursor.execute("""
+                UPDATE candidate_score
+                   SET score = %s,
+                       justification = %s,
+                       updated_at = NOW()
+                 WHERE score_id = %s
+            """, (score, justification, row[0]))
+        else:
+            # Insert new score
+            cursor.execute("""
+                INSERT INTO candidate_score (candidate_id, category_name, score, justification, created_at)
+                VALUES (%s, %s, %s, %s, NOW())
+            """, (candidate_id, category, score, justification))
+        conn.commit()
+    except Exception as e:
+        msg = f"Error upserting category score: {e}"
+        logger.error(msg)
+        save_log("ERROR", msg, process="Candidate_Score_Upsert")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
