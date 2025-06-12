@@ -1,4 +1,6 @@
 # routes/score_routes.py
+import os,sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from flask import Blueprint, request, jsonify
 import os, logging, mysql.connector
 from utils.pdf_utils import read_pdf_content
@@ -13,6 +15,7 @@ score_bp = Blueprint('score_bp', __name__)
 @score_bp.route('/recommended', methods=['GET'])
 def recommended():
     jd_id = request.args.get('jd_id')
+    resume_subfolder = request.args.get('resume_folder', '').strip()
     if not jd_id:
         msg = "Missing jd_id parameter"
         save_log("ERROR", msg, process="JD_Analysis")
@@ -46,10 +49,11 @@ def recommended():
             if row:
                 category_names.append(row["name"])
 
-        # 3) Point to your ./resumes folder
-        resumes_dir = os.path.join(os.path.dirname(__file__), '../resumes')
+        # 3) Point to your ./resumes folder, optionally with subfolder
+        base_dir = os.path.join(os.path.dirname(__file__), '../resumes')
+        resumes_dir = os.path.join(base_dir, resume_subfolder) if resume_subfolder else base_dir
         if not os.path.isdir(resumes_dir):
-            msg = f"Resumes folder not found at {resumes_dir}"
+            msg = f"Resumes folder not found at {resumes_dir} (subfolder: '{resume_subfolder}')"
             save_log("ERROR", msg, process="JD_Analysis")
             cursor.close()
             conn.close()
