@@ -3,9 +3,15 @@ import os, sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import os
 
+import google.generativeai as genai
+
 class Settings:
-    # DeepSeek API key (stored in environment variable DEEPSEEK_KEY)
-    OPENAI_API_KEY: str = os.getenv("DEEPSEEK_KEY", "")
+    # Gemini API key (stored in environment variable GEMINI_API_KEY)
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+
+settings = Settings()
+# Configure Gemini SDK
+genai.configure(api_key=settings.GEMINI_API_KEY)
 
 # Database connection parameters (from environment or defaults)
 db_config = {

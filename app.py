@@ -1,4 +1,6 @@
-# app.py
+import os
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import logging
 from flask import Flask
@@ -8,6 +10,7 @@ from routes.jd_routes import jd_bp
 from routes.score_routes import score_bp
 
 # ---------- Logging ----------
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 

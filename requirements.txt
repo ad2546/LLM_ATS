@@ -6,3 +6,7 @@ python-dotenv
 requests
 mysql-connector-python
 PyMuPDF
+google-generativeai 
+faiss-cpu
+google.genai
+pymysql

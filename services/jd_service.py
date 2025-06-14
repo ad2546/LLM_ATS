@@ -1,161 +1,94 @@
-# services/jd_service.py
-import os, sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-import json
-import logging
-import requests
+"""
+services/jd_service.py
 
+NOTE: All JD analysis now uses Gemini embeddings + FAISS for category detection and similarity.
+The function analyze_jd is the sole analysis function. analyze_jd_with_gpt is kept as an alias for compatibility.
+"""
+import os, sys
+
+import requests
+import google.generativeai as genai
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from utils.category_utils import get_or_create_category_id
+import os
+import logging
+import mysql.connector
+import json
 from utils.db_utils import get_connection
 from Tools.logs import save_log
-from config import Settings
+from utils.embeddings import embed_text
 
 logger = logging.getLogger(__name__)
-settings = Settings()
 
-# Fetch all category names that already exist in the `category` table
-def fetch_all_category_names() -> list:
-    conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT `name` FROM `category`")
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return [row[0] for row in rows]
+from utils.embeddings import get_category_index
 
-# Insert a new category row if it does not exist; return its category_id
-def get_or_create_category_id(category_name: str, category_type: str) -> int:
-    conn = get_connection()
-    cursor = conn.cursor()
+def analyze_jd(jd_text: str) -> dict:
+    """
+    Classify a job description into a single best-fit category using Gemini Pro LLM prompting.
+    Returns {"categories": [name1], "qualifications": "", "requirements": ""}
+    """
     try:
-        cursor.execute("SELECT `category_id` FROM `category` WHERE `name` = %s", (category_name,))
-        row = cursor.fetchone()
-        if row:
-            return row[0]
-
-        cursor.execute(
-            "INSERT INTO `category` (`name`, `type`) VALUES (%s, %s)",
-            (category_name, category_type)
-        )
-        conn.commit()
-        return cursor.lastrowid
-    finally:
-        cursor.close()
+        # Load all category names from DB
+        conn = mysql.connector.connect(**{
+            "host": os.getenv('MYSQL_HOST', 'localhost'),
+            "user": os.getenv('MYSQL_USER', 'root'),
+            "password": os.getenv('MYSQL_PASSWORD', ''),
+            "database": os.getenv('MYSQL_DATABASE', 'LLM_Resume')
+        })
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM category")
+        categories = [row[0] for row in cur.fetchall()]
+        cur.close()
         conn.close()
 
-def analyze_jd_with_gpt(jd_text: str) -> dict:
-    """
-    Calls DeepSeek to classify the JD into up to two categories, and extract qualifications/requirements.
-    Returns a dict:
-      {
-        "categories": [... up to two category names ...],
-        "qualifications": "<short summary>",
-        "requirements": "<short summary>"
-      }
-    """
-    existing_names = fetch_all_category_names()
-    if not existing_names:
-        prompt_category_list = "    (no categories exist in the database)\n"
-    else:
-        prompt_category_list = ""
-        for name in existing_names:
-            prompt_category_list += f'    "{name}"\n'
+        # Prepare prompt with category options
+        category_options = ", ".join(categories)
+        prompt = f"""
+You are a job description analyzer. Given the following job description, extract the single best-fit job category (choose one category from the following options: {category_options}), qualifications, and requirements.
 
-    prompt = f"""
-You are an AI model. Given a job description, choose up to two categories, plus extract qualifications and requirements.
+Respond ONLY with a JSON object in the format:
+{{
+  "category": category1,
+  "qualifications": "...",
+  "requirements": "..."
+}}
 
-Below is the list of valid category names (pulled from database). Pick exactly up to two that match this JD.
-If fewer than two apply, return only those. If none apply, return an empty array [].
-
-Valid categories (from database):
-{prompt_category_list}
-
-Format your answer as a JSON object with exactly these fields:
-- "categories": an array of zero, one, or two distinct category names, each matching one above
-- "qualifications": a short summary of academic/professional credentials (one line, comma-separated)
-- "requirements": a short summary of key skills/experience needed (one line, comma-separated)
-
-Do NOT include markdown, commentary, or extra fields—only the JSON object.
-
-### Job Description:
+Job Description:
+\"\"\"
 {jd_text}
-
-### Example valid output:
-{{
-  "categories": ["Academic Nursing","Nursing Research"],
-  "qualifications": "PhD in Nursing, RN license",
-  "requirements": "5+ years teaching, curriculum development"
-}}
-
-### Example if only one category:
-{{
-  "categories": ["Academic Nursing"],
-  "qualifications": "PhD in Nursing, RN license",
-  "requirements": "5+ years teaching, research publications"
-}}
-
-### Example if no match:
-{{
-  "categories": [],
-  "qualifications": "",
-  "requirements": ""
-}}
+\"\"\"
 """
 
-    url = "https://api.deepseek.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        "Content-Type":  "application/json"
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a JD analyzer that returns exactly the JSON object described."
-            },
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": 0.3
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-
-        response_text = response.json()['choices'][0]['message']['content'].strip()
-        logger.info(f"DeepSeek raw response for JD classification: {response_text}")
-
-        # Strip code fences if present
-        if response_text.startswith("```json"):
-            response_text = response_text[7:].strip("` \n")
-        elif response_text.startswith("```"):
-            response_text = response_text[3:].strip("` \n")
-
-        result = json.loads(response_text)
-        if not isinstance(result, dict):
-            raise ValueError("DeepSeek did not return a JSON object")
-
-        for field in ("categories", "qualifications", "requirements"):
-            if field not in result:
-                raise ValueError(f"Missing field '{field}' in DeepSeek response")
-
-        # Deduplicate categories and limit to 1
-        unique_cats = []
-        for name in result["categories"]:
-            if name not in unique_cats:
-                unique_cats.append(name)
-            if len(unique_cats) == 1:
-                break
-        result["categories"] = unique_cats[:1]
-
-        return result
-
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        content = response.text.strip()
+        logger.info(f"Gemini raw response: {content}")
+        import re
+        try:
+            result = json.loads(content)
+        except Exception:
+            # Try to extract JSON block from output if there's extra text
+            match = re.search(r'\{.*?\}', content, re.DOTALL)
+            if match:
+                try:
+                    result = json.loads(match.group())
+                except Exception:
+                    result = {}
+            else:
+                result = {}
+        # For backward compatibility: wrap single category in a list as 'categories'
+        categories = [result["category"]] if "category" in result else []
+        qualifications = result.get("qualifications", "")
+        requirements = result.get("requirements", "")
+        return {"categories": categories, "qualifications": qualifications, "requirements": requirements}
     except Exception as e:
-        msg = f"Error calling DeepSeek or parsing response: {str(e)}"
-        logger.error(msg)
-        save_log("ERROR", msg, process="JD_Analysis")
+        logger.error(f"JD Gemini flash classification failed: {e}")
+        save_log("ERROR", str(e), process="JD_Analysis")
         return {"categories": [], "qualifications": "", "requirements": ""}
 
+#
+
+analyze_jd_with_gpt = analyze_jd
 
 def save_jd_to_db(jd_text: str, categories: list, qualifications: str, requirements: str):
     """
@@ -166,10 +99,8 @@ def save_jd_to_db(jd_text: str, categories: list, qualifications: str, requireme
       - qualifications, requirements.
     """
     c1_id = None
-
     if len(categories) >= 1:
         c1_id = get_or_create_category_id(categories[0], "category1")
-
     conn = get_connection()
     cursor = conn.cursor()
     try:
@@ -198,3 +129,4 @@ def save_jd_to_db(jd_text: str, categories: list, qualifications: str, requireme
         f"JD saved (detected='{','.join(categories)}', quals='{qualifications}', reqs='{requirements}')",
         process="JD_Analysis"
     )
+ 

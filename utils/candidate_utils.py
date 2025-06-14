@@ -6,7 +6,13 @@ import re
 import json
 import logging
 import requests
+import pymysql
 import mysql.connector
+import google.generativeai as genai
+
+# Set your Gemini API key from environment variable
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+genai.configure(api_key=GEMINI_API_KEY)
 
 # Ensure project root is on sys.path so Tools.logs can be imported
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -15,9 +21,6 @@ from Tools.logs import save_log   # save_log(log_type, message, process="Candida
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# DeepSeek API key
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_KEY", "")
 
 # Database configuration (expects environment variables)
 db_config = {
@@ -134,7 +137,7 @@ def _regex_extract_basic(resume_text: str) -> dict:
 def extract_candidate_details(resume_text: str) -> dict:
     """
     Combined extraction: first try regex (_regex_extract_basic). If any of the nine fields
-    is still None (or empty list for skills), fall back to DeepSeek LLM for those missing pieces.
+    is still None (or empty list for skills), fall back to Gemini LLM for those missing pieces.
     """
     # 1) First‐pass regex extraction
     parsed = _regex_extract_basic(resume_text)
@@ -152,7 +155,7 @@ def extract_candidate_details(resume_text: str) -> dict:
         # All fields found by regex, return immediately
         return parsed
 
-    # 2) Build a DeepSeek prompt asking only for missing fields
+    # 2) Build a Gemini prompt asking only for missing fields
     ask_fields = ", ".join(f'"{f}"' for f in missing_fields)
     prompt = f"""
 You are an AI assistant specialized in parsing resumes. Extract only the following fields (if present) in valid JSON format: {ask_fields}
@@ -180,25 +183,10 @@ Respond with only a JSON object containing exactly those keys (no extra commenta
 """
 
     try:
-        url = "https://api.deepseek.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "system", "content": "You are a resume parsing assistant. Return exactly the requested JSON."},
-                {"role": "user",   "content": prompt}
-            ],
-            "temperature": 0.0
-        }
-
-        r = requests.post(url, headers=headers, json=payload)
-        r.raise_for_status()
-        raw = r.json()["choices"][0]["message"]["content"].strip()
-
-        # Strip code fences if present
+        # Use Gemini 2.0 Flash model for fast and cheap inference
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        response = model.generate_content(prompt)
+        raw = response.text.strip()
         if raw.startswith("```json"):
             raw = raw[7:].strip("` \n")
         elif raw.startswith("```"):
@@ -215,18 +203,8 @@ Respond with only a JSON object containing exactly those keys (no extra commenta
         if not isinstance(parsed["skills"], list):
             parsed["skills"] = []
 
-    except requests.exceptions.RequestException as e:
-        msg = f"DeepSeek request failed while extracting missing fields: {e}"
-        logger.error(msg)
-        save_log("ERROR", msg, process="Candidate_Parsing")
-
-    except json.JSONDecodeError as e:
-        msg = f"JSON parsing error from DeepSeek (missing fields): {e}"
-        logger.error(msg)
-        save_log("ERROR", msg, process="Candidate_Parsing")
-
     except Exception as e:
-        msg = f"Unexpected error extracting candidate details via DeepSeek: {e}"
+        msg = f"Gemini request failed while extracting missing fields: {e}"
         logger.error(msg)
         save_log("ERROR", msg, process="Candidate_Parsing")
 
@@ -360,4 +338,37 @@ def upsert_category_score(candidate_id: int, category: str, score: float, justif
         raise
     finally:
         cursor.close()
-        conn.close()
+
+
+def save_score_to_jd_score(
+    db_connection,
+    jd_id,
+    candidate_id,
+    candidate_email,
+    candidate_name,
+    category_score,
+    final_score,
+    qualifications_score,
+    requirements_score,
+    reason,
+    resume_filename,
+    resume_path
+):
+    try:
+        with db_connection.cursor() as cursor:
+            insert_sql = """
+                INSERT INTO jd_score (
+                    jd_id, candidate_id, candidate_email, candidate_name,
+                    category_score, final_score, qualifications_score, requirements_score,
+                    reason, resume_filename, resume_path
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """
+            cursor.execute(insert_sql, (
+                jd_id, candidate_id, candidate_email, candidate_name,
+                category_score, final_score, qualifications_score, requirements_score,
+                reason, resume_filename, resume_path
+            ))
+            db_connection.commit()
+        print("Scoring result saved to jd_score.")
+    except Exception as e:
+        print("Error saving score to jd_score:", e)

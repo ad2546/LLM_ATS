@@ -2,10 +2,10 @@
 import os, sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import logging
-
+from utils.candidate_utils import extract_candidate_details
 from flask import Blueprint, request, jsonify
 from utils.pdf_utils import read_pdf_content
-from services.jd_service import analyze_jd_with_gpt, save_jd_to_db
+from services.jd_service import analyze_jd, save_jd_to_db
 from Tools.logs import save_log
 
 logger = logging.getLogger(__name__)
@@ -34,9 +34,9 @@ def upload_jd():
             msg = "Job description PDF parsing returned no text"
             save_log("ERROR", msg, process="JD_Analysis")
             return jsonify({'error': msg}), 400
-
-        # 2) Call DeepSeek to classify JD
-        jd_info = analyze_jd_with_gpt(jd_text)
+        extract_candidate_details(jd_text)  # Ensure candidate details are extracted
+        # 2) Embed JD and classify via FAISS
+        jd_info = analyze_jd(jd_text)
         categories = jd_info.get("categories", [])
         qualifications = jd_info.get("qualifications", "")
         requirements = jd_info.get("requirements", "")
