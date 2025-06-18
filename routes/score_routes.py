@@ -71,7 +71,7 @@ def recommended():
             else:
                 # Fallback: lookup by email
                 try:
-                    cursor.execute("SELECT candidate_id FROM candidate WHERE email=%s", (candidate_email,))
+                    cursor.execute("SELECT candidate_id FROM candidate WHERE candidate_email=%s", (candidate_email,))
                     c_row = cursor.fetchone()
                     if c_row:
                         candidate_id = c_row[0]
@@ -80,10 +80,10 @@ def recommended():
 
             cursor.execute("""
                 INSERT INTO jd_score (
-                    jd_id, candidate_id, candidate_email, category_score,
+                    jd_id, candidate_id, category_score,
                     qualifications_score, requirements_score, final_score, reason
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     category_score=VALUES(category_score),
                     qualifications_score=VALUES(qualifications_score),
@@ -93,7 +93,6 @@ def recommended():
             """, (
                 jd_id,
                 candidate_id,
-                candidate_email,
                 rec.get("category_score"),
                 rec.get("qualifications_score"),
                 rec.get("requirements_score"),

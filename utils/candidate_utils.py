@@ -214,81 +214,54 @@ Respond with only a JSON object containing exactly those keys (no extra commenta
 def upsert_candidate(cand_info: dict, resume_path: str) -> int:
     """
     Inserts a new candidate or updates existing based on email.
-    cand_info is the dict returned by extract_candidate_details(...).
-    resume_path is the full file path to the stored resume PDF.
-
     Returns the candidate_id.
     """
     email = (cand_info.get("email") or "").lower().strip()
     if not email:
         raise ValueError("Cannot upsert candidate without an email.")
 
+    candidate_name = cand_info.get("name")
+    candidate_phone = cand_info.get("phone")
+    candidate_location = cand_info.get("current_location")
+    candidate_year = cand_info.get("years_of_experience")
+    candidate_job = cand_info.get("last_position_title")
+    candidate_resume = resume_path
+    candidate_company = cand_info.get("company", None)
+
     conn = mysql.connector.connect(**db_config)
     cursor = conn.cursor()
-
     try:
-        # Check if email already exists
-        cursor.execute("SELECT `candidate_id` FROM `candidate` WHERE `email` = %s", (email,))
-        row = cursor.fetchone()
+        sql = """
+        INSERT INTO `candidate`
+            (`candidate_name`, `candidate_email`, `candidate_phone`, `candidate_location`,
+             `candidate_year`, `candidate_job`, `candidate_resume`, `created_at`, `candidate_updated_time`, `candidate_company`)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP, NOW(), %s)
+        ON DUPLICATE KEY UPDATE
+            `candidate_name` = VALUES(`candidate_name`),
+            `candidate_phone` = VALUES(`candidate_phone`),
+            `candidate_location` = VALUES(`candidate_location`),
+            `candidate_year` = VALUES(`candidate_year`),
+            `candidate_job` = VALUES(`candidate_job`),
+            `candidate_resume` = VALUES(`candidate_resume`),
+            `candidate_updated_time` = NOW(),
+            `candidate_company` = VALUES(`candidate_company`);
+        """
+        vals = (
+            candidate_name,
+            email,
+            candidate_phone,
+            candidate_location,
+            candidate_year,
+            candidate_job,
+            candidate_resume,
+            candidate_company
+        )
+        cursor.execute(sql, vals)
+        conn.commit()
 
-        if row:
-            # Candidate exists → UPDATE only those fields that are not None
-            candidate_id = row[0]
-            cursor.execute(
-                """
-                UPDATE `candidate`
-                   SET `name`                 = COALESCE(%s, `name`),
-                       `phone`                = COALESCE(%s, `phone`),
-                       `linkedin_url`         = COALESCE(%s, `linkedin_url`),
-                       `current_location`     = COALESCE(%s, `current_location`),
-                       `years_of_experience`  = COALESCE(%s, `years_of_experience`),
-                       `education_level`      = COALESCE(%s, `education_level`),
-                       `last_position_title`  = COALESCE(%s, `last_position_title`),
-                       `skills`               = COALESCE(%s, `skills`),
-                       `resume_path`          = %s,
-                       `updated_at`           = NOW()
-                 WHERE `candidate_id` = %s
-                """,
-                (
-                    cand_info.get("name"),
-                    cand_info.get("phone"),
-                    cand_info.get("linkedin_url"),
-                    cand_info.get("current_location"),
-                    cand_info.get("years_of_experience"),
-                    cand_info.get("education_level"),
-                    cand_info.get("last_position_title"),
-                    ", ".join(cand_info.get("skills", [])) or None,
-                    resume_path,
-                    candidate_id
-                )
-            )
-            conn.commit()
-        else:
-            # Insert new candidate
-            cursor.execute(
-                """
-                INSERT INTO `candidate`
-                  (`name`, `email`, `phone`, `linkedin_url`,
-                   `current_location`, `years_of_experience`, `education_level`,
-                   `last_position_title`, `skills`, `resume_path`, `created_at`)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """,
-                (
-                    cand_info.get("name"),
-                    email,
-                    cand_info.get("phone"),
-                    cand_info.get("linkedin_url"),
-                    cand_info.get("current_location"),
-                    cand_info.get("years_of_experience"),
-                    cand_info.get("education_level"),
-                    cand_info.get("last_position_title"),
-                    ", ".join(cand_info.get("skills", [])),
-                    resume_path
-                )
-            )
-            conn.commit()
-            candidate_id = cursor.lastrowid
-
+        # Fetch candidate_id for downstream use
+        cursor.execute("SELECT candidate_id FROM candidate WHERE candidate_email = %s", (email,))
+        candidate_id = cursor.fetchone()[0]
         return candidate_id
 
     except Exception as e:
@@ -300,44 +273,6 @@ def upsert_candidate(cand_info: dict, resume_path: str) -> int:
     finally:
         cursor.close()
         conn.close()
-
-def upsert_category_score(candidate_id: int, category: str, score: float, justification: str) -> None:
-    """
-    Inserts or updates the category score for a candidate.
-    """
-    conn = mysql.connector.connect(**db_config)
-    cursor = conn.cursor()
-
-    try:
-        cursor.execute("""
-            SELECT score_id FROM candidate_score
-            WHERE candidate_id = %s AND category_name = %s
-        """, (candidate_id, category))
-        row = cursor.fetchone()
-
-        if row:
-            # Update existing score
-            cursor.execute("""
-                UPDATE candidate_score
-                   SET score = %s,
-                       justification = %s,
-                       updated_at = NOW()
-                 WHERE score_id = %s
-            """, (score, justification, row[0]))
-        else:
-            # Insert new score
-            cursor.execute("""
-                INSERT INTO candidate_score (candidate_id, category_name, score, justification, created_at)
-                VALUES (%s, %s, %s, %s, NOW())
-            """, (candidate_id, category, score, justification))
-        conn.commit()
-    except Exception as e:
-        msg = f"Error upserting category score: {e}"
-        logger.error(msg)
-        save_log("ERROR", msg, process="Candidate_Score_Upsert")
-        raise
-    finally:
-        cursor.close()
 
 
 def save_score_to_jd_score(

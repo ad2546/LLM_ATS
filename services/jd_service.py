@@ -76,7 +76,6 @@ Job Description:
                     result = {}
             else:
                 result = {}
-        # For backward compatibility: wrap single category in a list as 'categories'
         categories = [result["category"]] if "category" in result else []
         qualifications = result.get("qualifications", "")
         requirements = result.get("requirements", "")
@@ -95,26 +94,21 @@ def save_jd_to_db(jd_text: str, categories: list, qualifications: str, requireme
     Saves a new job_description row with:
       - jd_text,
       - category_detected (comma-separated),
-      - category1_id,
       - qualifications, requirements.
     """
-    c1_id = None
-    if len(categories) >= 1:
-        c1_id = get_or_create_category_id(categories[0], "category1")
     conn = get_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
             """
             INSERT INTO `job_description`
-              (`jd_text`, `category_detected`, `uploaded_at`,
-               `category1_id`, `qualifications`, `requirements`)
-            VALUES (%s, %s, NOW(), %s, %s, %s)
+              (`jd_text`, `category_detected`, `uploaded_at`
+               , `qualifications`, `requirements`)
+            VALUES (%s, %s, NOW(), %s, %s)
             """,
             (
                 jd_text,
                 ", ".join(categories),
-                c1_id,
                 qualifications,
                 requirements
             )

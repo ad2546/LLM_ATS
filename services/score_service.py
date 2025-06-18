@@ -8,6 +8,7 @@ from utils.candidate_utils import extract_candidate_details
 from Tools.logs import save_log
 from utils.candidate_utils import save_score_to_jd_score
 logger = logging.getLogger(__name__)
+from utils.db_utils import get_connection
 
 # Utility to normalize resume section (handle list, str, None)
 def normalize_section(section):
@@ -129,7 +130,8 @@ def score_all_resumes_in_folder(
                 'reason': gemini_result.get('reason')
             })
 
-            # Save score to database
+            conn = get_connection()
+            cursor = conn.cursor(dictionary=True)
            
         except Exception as e:
             logger.error(f"Failed to process resume '{abs_path}': {e}")
